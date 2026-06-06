@@ -40,13 +40,22 @@ export const manifest = {
         default: "volumes",
       },
       {
+        key: "notesUnit",
+        label: "Per-Series Unit From Notes",
+        description:
+          "Opt-in. When enabled, a [unit:chapters] or [unit:volumes] marker in a series' Codex notes overrides the default unit for that series (requires Sync Ratings & Notes ON). While enabled, notes are not pushed to AniList and AniList notes are not imported, so the marker can't leak or be clobbered. Off = upstream behavior.",
+        type: "boolean" as const,
+        required: false,
+        default: false,
+      },
+      {
         key: "enableReread",
         label: "Detect Rereads (AniList REPEATING)",
         description:
-          "When a series is COMPLETED on AniList but Codex shows it being read again (recently), push it as Rereading (REPEATING) on AniList. When the reread finishes, set it back to Completed and bump the repeat count.",
+          "Opt-in. When a series is COMPLETED on AniList but Codex shows it being read again (recently), push it as Rereading (REPEATING) on AniList. When the reread finishes, set it back to Completed and bump the repeat count. Off = upstream behavior.",
         type: "boolean" as const,
         required: false,
-        default: true,
+        default: false,
       },
       {
         key: "rereadRecentDays",

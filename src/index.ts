@@ -48,7 +48,9 @@ let scoreFormat = "POINT_10";
 let progressUnit: "volumes" | "chapters" = "volumes";
 let pauseAfterDays = 0;
 let dropAfterDays = 0;
-let enableReread = true;
+// Custom features — both OFF by default so the plugin behaves like upstream.
+let notesUnit = false;
+let enableReread = false;
 let rereadRecentDays = 90;
 let searchFallback = false;
 let privateMode = true;
@@ -289,9 +291,9 @@ export const provider: SyncProvider = {
           );
         }
 
-        // Per-series unit: a [unit:chapters]/[unit:volumes] marker in the
-        // Codex series notes overrides the global default. Never pushed back.
-        const unit = detectUnit(entry.notes, progressUnit);
+        // Per-series unit override via a [unit:*] notes marker — only when
+        // notesUnit is enabled. Otherwise this is the upstream global unit.
+        const unit = notesUnit ? detectUnit(entry.notes, progressUnit) : progressUnit;
 
         // Reread detection layered on top of the base status mapping.
         const ani = existing.get(mediaId);
@@ -349,8 +351,11 @@ export const provider: SyncProvider = {
           saveParams.completedAt = isoToFuzzyDate(entry.completedAt);
         }
 
-        // Notes are intentionally NOT pushed: they may carry a local
-        // [unit:*] routing marker that must never leak to AniList.
+        // Map notes (upstream behavior). When notesUnit is enabled we skip
+        // this, since the notes may carry a [unit:*] marker we must not leak.
+        if (!notesUnit && entry.notes !== undefined) {
+          saveParams.notes = entry.notes;
+        }
 
         const resolvedExternalId = String(mediaId);
         const existed = existing.has(mediaId);
@@ -404,8 +409,9 @@ export const provider: SyncProvider = {
       score: entry.score > 0 ? convertScoreFromAnilist(entry.score, scoreFormat) : undefined,
       startedAt: fuzzyDateToIso(entry.startedAt),
       completedAt: fuzzyDateToIso(entry.completedAt),
-      // Do not import AniList notes: Codex notes may hold a [unit:*] marker.
-      notes: undefined,
+      // Skip note import only when notesUnit is on (so a pulled note can't
+      // clobber a [unit:*] marker). Otherwise upstream behavior.
+      notes: notesUnit ? undefined : entry.notes || undefined,
     }));
 
     logger.info(
@@ -471,6 +477,9 @@ createSyncPlugin({
       if (typeof uc.dropAfterDays === "number" && uc.dropAfterDays >= 0) {
         dropAfterDays = uc.dropAfterDays;
       }
+      if (typeof uc.notesUnit === "boolean") {
+        notesUnit = uc.notesUnit;
+      }
       if (typeof uc.enableReread === "boolean") {
         enableReread = uc.enableReread;
       }
@@ -487,7 +496,7 @@ createSyncPlugin({
         hiddenFromStatusLists = uc.hiddenFromStatusLists;
       }
       logger.info(
-        `Plugin config: progressUnit=${progressUnit}, pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, enableReread=${enableReread}, rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
+        `Plugin config: progressUnit=${progressUnit}, pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, notesUnit=${notesUnit}, enableReread=${enableReread}, rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
       );
     }
   },

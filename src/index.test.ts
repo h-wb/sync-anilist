@@ -439,8 +439,8 @@ describe("pushProgress visibility params", () => {
     expect(args.status).toBe("COMPLETED");
     expect(args.private).toBe(true);
     expect(args.hiddenFromStatusLists).toBe(false);
-    // Notes are never pushed to AniList (they may carry a local [unit:*] marker).
-    expect(args.notes).toBeUndefined();
+    // Default behavior is upstream: notes are pushed (notesUnit is off).
+    expect(args.notes).toBe("Great manga");
   });
 
   it("sends visibility params for every entry in a batch", async () => {
