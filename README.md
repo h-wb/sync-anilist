@@ -15,7 +15,7 @@ The Codex-facing plugin name is still `sync-anilist`, so it drops into Codex exa
    - **Name**: `sync-anilist`
    - **Display Name**: `AniList Sync`
    - **Command**: `npx`
-   - **Arguments**: `-y https://github.com/h-wb/sync-anilist/releases/download/v1.2.0/h-wb-sync-anilist-1.2.0.tgz`  *(bump the version in the URL to upgrade)*
+   - **Arguments**: `-y https://github.com/h-wb/sync-anilist/releases/download/v1.3.0/h-wb-sync-anilist-1.3.0.tgz`  *(bump the version in the URL to upgrade)*
 3. **Save**, then **Test Connection**.
 
 > Installed from a prebuilt tarball attached to a GitHub Release — **no npm account, no registry, and no `git` on the host** (`npx github:…` needs git, which many container images lack). The tarball is self-contained (the SDK is bundled in); the host just needs Node 22+. The URL is versioned — change the version to upgrade.
@@ -52,6 +52,16 @@ Requirements & notes:
 - Needs AniList to report a total for the unit; otherwise it falls back to the raw local count.
 - It does **not** fix a partial library that starts mid-series (e.g. *One Piece* from chapter 950): the proportional model assumes you start from the beginning. That case needs Codex to send the actual chapter number, which it currently doesn't.
 
+### Log each volume on AniList (`stepProgress`)
+
+By default the plugin pushes the target progress in a single update — so a jump from 0 to 4 shows once as "read volume 4". Turn on **Post Each Volume Separately** (opt-in, off by default) to instead push **one update per unit** — `1`, `2`, `3`, `4` — from your current AniList progress up to the target, so AniList's progress history logs each volume.
+
+Pairs naturally with scaling (the target is the scaled value), and it's idempotent: it only steps the *new* delta each sync (current `4` → later target `7` posts `5, 6, 7`).
+
+Trade-offs:
+- **One API call per unit.** A large gap is **capped** (above ~50 it falls back to a single jump) to protect AniList's rate limit, especially on a first-time backfill.
+- **AniList may coalesce** rapid updates into a single "read 1 – N" feed activity rather than N separate items — so the discrete history isn't guaranteed. Worth trying on one series to see how your feed renders it.
+
 ## Reread (AniList `REPEATING`)
 
 Codex has no concept of rereading, but AniList does. This plugin can infer it — **opt-in via the Detect Rereads setting** (off by default):
@@ -74,6 +84,8 @@ Use **Push Only** (Settings → Integrations → Settings). Codex is the source 
 | Setting | Default | Description |
 |---|---|---|
 | Progress Unit | `volumes` | Unit each Codex book maps to on AniList (`volumes` or `chapters`); scope per library by installing per-library instances |
+| Scale Progress to AniList Total | `off` | Opt-in: map local progress proportionally onto AniList's total (for omnibus/perfect editions) |
+| Post Each Volume Separately | `off` | Opt-in: push one update per unit so AniList logs each volume/chapter (instead of a single jump) |
 | Detect Rereads | `off` | Opt-in: enable AniList `REPEATING` handling |
 | Reread Activity Window (days) | `90` | Only treat COMPLETED-on-AniList series as rereads with activity inside this window |
 | Auto-Pause After Days | `0` (off) | Set in-progress series to Paused after inactivity |

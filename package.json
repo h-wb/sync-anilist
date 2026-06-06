@@ -1,6 +1,6 @@
 {
   "name": "@h-wb/sync-anilist",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Codex plugin to sync manga reading progress to AniList, with reread (REPEATING) detection and proportional progress scaling",
   "main": "dist/index.js",
   "bin": "dist/index.js",

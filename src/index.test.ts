@@ -12,6 +12,7 @@ import {
   setProgressUnit,
   setScaleProgress,
   setSearchFallback,
+  setStepProgress,
   setViewerId,
 } from "./index.js";
 
@@ -667,5 +668,92 @@ describe("pushProgress scaleProgress", () => {
     });
 
     expect(saveArgs(client).progressVolumes).toBe(1);
+  });
+});
+
+// =============================================================================
+// pushProgress — stepProgress (one update per unit) Tests
+// =============================================================================
+
+describe("pushProgress stepProgress", () => {
+  // A client whose remote list has one entry with the given current progress.
+  const clientWithRemote = (remote: Record<string, unknown>) =>
+    makeMockClient({
+      getMangaList: vi
+        .fn()
+        .mockResolvedValue(mangaListPage([{ mediaId: 42, status: "CURRENT", ...remote }])),
+    });
+
+  function pushOne(client: AniListClient, entry: SyncEntry) {
+    setClient(client);
+    setViewerId(1);
+    return provider.pushProgress({ entries: [entry] });
+  }
+
+  function volumesPushed(client: AniListClient): number[] {
+    return (client.saveEntry as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[0].progressVolumes,
+    );
+  }
+
+  afterEach(() => {
+    setClient(null);
+    setViewerId(null);
+    setStepProgress(false);
+    setProgressUnit("volumes");
+  });
+
+  it("posts each volume from current to target as its own update", async () => {
+    setStepProgress(true);
+    const client = clientWithRemote({ progressVolumes: 0 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 4 } });
+
+    expect(volumesPushed(client)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("resumes stepping from the current AniList progress", async () => {
+    setStepProgress(true);
+    const client = clientWithRemote({ progressVolumes: 2 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 5 } });
+
+    expect(volumesPushed(client)).toEqual([3, 4, 5]);
+  });
+
+  it("makes a single call when there's no progress gain", async () => {
+    setStepProgress(true);
+    const client = clientWithRemote({ progressVolumes: 4 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 4 } });
+
+    expect(client.saveEntry).toHaveBeenCalledTimes(1);
+    expect(saveArgs(client).progressVolumes).toBe(4);
+  });
+
+  it("makes a single jump when stepping is off (default)", async () => {
+    const client = clientWithRemote({ progressVolumes: 0 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 4 } });
+
+    expect(client.saveEntry).toHaveBeenCalledTimes(1);
+    expect(saveArgs(client).progressVolumes).toBe(4);
+  });
+
+  it("falls back to a single jump when the gap exceeds the cap", async () => {
+    setStepProgress(true);
+    const client = clientWithRemote({ progressVolumes: 0 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 60 } });
+
+    expect(client.saveEntry).toHaveBeenCalledTimes(1);
+    expect(saveArgs(client).progressVolumes).toBe(60);
+  });
+
+  it("steps chapters when the unit is chapters", async () => {
+    setStepProgress(true);
+    setProgressUnit("chapters");
+    const client = clientWithRemote({ progress: 0 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 3 } });
+
+    const chapters = (client.saveEntry as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[0].progress,
+    );
+    expect(chapters).toEqual([1, 2, 3]);
   });
 });

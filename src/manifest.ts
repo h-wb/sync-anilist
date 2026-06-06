@@ -48,6 +48,15 @@ export const manifest = {
         default: false,
       },
       {
+        key: "stepProgress",
+        label: "Post Each Volume Separately",
+        description:
+          "Opt-in. Instead of jumping straight to the target progress, push one update per volume/chapter (read 1, read 2, …) from your current AniList progress, so AniList logs the climb. Pairs with Scale Progress. Costs one API call per unit (capped for large gaps); AniList may merge rapid updates into a single 'read 1 – N' activity. Off = a single update.",
+        type: "boolean" as const,
+        required: false,
+        default: false,
+      },
+      {
         key: "enableReread",
         label: "Detect Rereads (AniList REPEATING)",
         description:

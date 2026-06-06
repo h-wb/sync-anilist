@@ -28,6 +28,7 @@ import {
 } from "@ashdev/codex-plugin-sdk";
 import {
   AniListClient,
+  type AniListSaveResult,
   anilistStatusToSync,
   convertScoreFromAnilist,
   convertScoreToAnilist,
@@ -43,6 +44,12 @@ const logger = createLogger({ name: "sync-anilist", level: "debug" });
 const DAY_MS = 1000 * 60 * 60 * 24;
 /** Max page size AniList allows for the manga-list query. */
 const PAGE_SIZE = 50;
+/**
+ * Safety cap for `stepProgress`: when the gap between current and target
+ * progress exceeds this, push a single jump instead of one call per unit
+ * (avoids hammering AniList's rate limit on a large first-time backfill).
+ */
+const MAX_PROGRESS_STEPS = 50;
 
 type ProgressUnit = "volumes" | "chapters";
 
@@ -61,6 +68,8 @@ let scoreFormat = "POINT_10";
 let progressUnit: ProgressUnit = "volumes";
 /** Scale local progress onto AniList's canonical total — OFF by default. */
 let scaleProgress = false;
+/** Post each unit as its own update so AniList logs the climb — OFF by default. */
+let stepProgress = false;
 let pauseAfterDays = 0;
 let dropAfterDays = 0;
 /** Reread detection — OFF by default so the plugin behaves like upstream. */
@@ -82,6 +91,9 @@ let hiddenFromStatusLists = false;
 }
 /** @internal */ export function setScaleProgress(enabled: boolean): void {
   scaleProgress = enabled;
+}
+/** @internal */ export function setStepProgress(enabled: boolean): void {
+  stepProgress = enabled;
 }
 /** @internal */ export function setSearchFallback(enabled: boolean): void {
   searchFallback = enabled;
@@ -109,6 +121,7 @@ function applyUserConfig(uc: Record<string, unknown>): void {
     progressUnit = uc.progressUnit;
   }
   scaleProgress = boolOption(uc.scaleProgress, scaleProgress);
+  stepProgress = boolOption(uc.stepProgress, stepProgress);
   pauseAfterDays = numberOption(uc.pauseAfterDays, pauseAfterDays);
   dropAfterDays = numberOption(uc.dropAfterDays, dropAfterDays);
   enableReread = boolOption(uc.enableReread, enableReread);
@@ -348,6 +361,45 @@ function buildSaveInput(
   return input;
 }
 
+/**
+ * Save an entry, optionally stepping the progress one unit at a time so AniList
+ * logs each volume/chapter (read 1, read 2, …) instead of a single jump.
+ *
+ * Intermediate calls send only the progress (and visibility flags); the final
+ * call carries the full `input` (status, score, dates, notes). Stepping only
+ * runs when `stepProgress` is on, the target is higher than the current AniList
+ * progress, and the gap is within {@link MAX_PROGRESS_STEPS} (else: one jump).
+ */
+async function saveProgress(
+  c: AniListClient,
+  input: SaveEntryInput,
+  remote: RemoteEntry | undefined,
+): Promise<AniListSaveResult> {
+  const isChapters = progressUnit === "chapters";
+  const target = isChapters ? input.progress : input.progressVolumes;
+  const current = (isChapters ? remote?.progress : remote?.progressVolumes) ?? 0;
+
+  if (
+    stepProgress &&
+    target !== undefined &&
+    target > current &&
+    target - current <= MAX_PROGRESS_STEPS
+  ) {
+    for (let p = current + 1; p < target; p++) {
+      const step: SaveEntryInput = {
+        mediaId: input.mediaId,
+        private: input.private,
+        hiddenFromStatusLists: input.hiddenFromStatusLists,
+      };
+      if (isChapters) step.progress = p;
+      else step.progressVolumes = p;
+      await c.saveEntry(step);
+    }
+  }
+
+  return c.saveEntry(input);
+}
+
 // =============================================================================
 // Sync provider
 // =============================================================================
@@ -417,7 +469,7 @@ export const provider: SyncProvider = {
         const input = buildSaveInput(entry, mediaId, decision, remote);
 
         const existed = remoteEntries.has(mediaId);
-        const saved = await client.saveEntry(input);
+        const saved = await saveProgress(client, input, remote);
         logger.debug(`Pushed entry ${mediaId}: unit=${progressUnit} status=${saved.status}`);
 
         // Reflect the new state so later entries in the batch see it.
@@ -504,7 +556,8 @@ createSyncPlugin({
       applyUserConfig(params.userConfig);
       logger.info(
         `Plugin config: progressUnit=${progressUnit}, scaleProgress=${scaleProgress}, ` +
-          `pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, enableReread=${enableReread}, ` +
+          `stepProgress=${stepProgress}, pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, ` +
+          `enableReread=${enableReread}, ` +
           `rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, ` +
           `private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
       );
