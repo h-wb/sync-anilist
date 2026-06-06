@@ -10,6 +10,7 @@ import {
   setHiddenFromStatusLists,
   setPrivateMode,
   setProgressUnit,
+  setScaleProgress,
   setSearchFallback,
   setViewerId,
 } from "./index.js";
@@ -566,5 +567,105 @@ describe("pushProgress completed-total fill", () => {
     const args = saveArgs(client);
     expect(args.status).toBe("CURRENT");
     expect(args.progressVolumes).toBe(2);
+  });
+});
+
+// =============================================================================
+// pushProgress — proportional progress scaling Tests
+// =============================================================================
+
+describe("pushProgress scaleProgress", () => {
+  const clientWithMedia = (media: Record<string, unknown>, status = "CURRENT") =>
+    makeMockClient({
+      getMangaList: vi.fn().mockResolvedValue(mangaListPage([{ mediaId: 42, status, media }])),
+    });
+
+  function pushOne(client: AniListClient, entry: SyncEntry) {
+    setClient(client);
+    setViewerId(1);
+    return provider.pushProgress({ entries: [entry] });
+  }
+
+  afterEach(() => {
+    setClient(null);
+    setViewerId(null);
+    setScaleProgress(false);
+    setProgressUnit("volumes");
+  });
+
+  it("scales in-progress volumes proportionally onto the AniList total", async () => {
+    setScaleProgress(true);
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    // 1 of 2 local volumes read → round(1/2 × 7) = 4
+    await pushOne(client, {
+      externalId: "42",
+      status: "reading",
+      progress: { volumes: 1, totalVolumes: 2 },
+    });
+
+    const args = saveArgs(client);
+    expect(args.status).toBe("CURRENT");
+    expect(args.progressVolumes).toBe(4);
+  });
+
+  it("reaches the canonical total at 100%", async () => {
+    setScaleProgress(true);
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, {
+      externalId: "42",
+      status: "completed",
+      progress: { volumes: 2, totalVolumes: 2 },
+    });
+
+    expect(saveArgs(client).progressVolumes).toBe(7);
+  });
+
+  it("is a no-op when the local total already matches AniList", async () => {
+    setScaleProgress(true);
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, {
+      externalId: "42",
+      status: "reading",
+      progress: { volumes: 3, totalVolumes: 7 },
+    });
+
+    expect(saveArgs(client).progressVolumes).toBe(3);
+  });
+
+  it("pushes the raw local count when scaling is off (default)", async () => {
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, {
+      externalId: "42",
+      status: "reading",
+      progress: { volumes: 1, totalVolumes: 2 },
+    });
+
+    expect(saveArgs(client).progressVolumes).toBe(1);
+  });
+
+  it("scales chapters when the unit is chapters", async () => {
+    setScaleProgress(true);
+    setProgressUnit("chapters");
+    const client = clientWithMedia({ status: "FINISHED", chapters: 100 });
+    // read count arrives in `volumes`; 1 of 2 local → round(1/2 × 100) = 50
+    await pushOne(client, {
+      externalId: "42",
+      status: "reading",
+      progress: { volumes: 1, totalChapters: 2 },
+    });
+
+    expect(saveArgs(client).progress).toBe(50);
+  });
+
+  it("falls back to the raw count when the Codex total is missing", async () => {
+    setScaleProgress(true);
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, {
+      externalId: "42",
+      status: "reading",
+      progress: { volumes: 1 },
+    });
+
+    expect(saveArgs(client).progressVolumes).toBe(1);
   });
 });

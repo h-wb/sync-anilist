@@ -18,6 +18,7 @@ import {
   type InitializeParams,
   type SyncEntry,
   type SyncEntryResult,
+  type SyncProgress,
   type SyncProvider,
   type SyncPullRequest,
   type SyncPullResponse,
@@ -58,6 +59,8 @@ let scoreFormat = "POINT_10";
 // =============================================================================
 
 let progressUnit: ProgressUnit = "volumes";
+/** Scale local progress onto AniList's canonical total — OFF by default. */
+let scaleProgress = false;
 let pauseAfterDays = 0;
 let dropAfterDays = 0;
 /** Reread detection — OFF by default so the plugin behaves like upstream. */
@@ -76,6 +79,9 @@ let hiddenFromStatusLists = false;
 }
 /** @internal */ export function setProgressUnit(unit: ProgressUnit): void {
   progressUnit = unit;
+}
+/** @internal */ export function setScaleProgress(enabled: boolean): void {
+  scaleProgress = enabled;
 }
 /** @internal */ export function setSearchFallback(enabled: boolean): void {
   searchFallback = enabled;
@@ -102,6 +108,7 @@ function applyUserConfig(uc: Record<string, unknown>): void {
   if (uc.progressUnit === "chapters" || uc.progressUnit === "volumes") {
     progressUnit = uc.progressUnit;
   }
+  scaleProgress = boolOption(uc.scaleProgress, scaleProgress);
   pauseAfterDays = numberOption(uc.pauseAfterDays, pauseAfterDays);
   dropAfterDays = numberOption(uc.dropAfterDays, dropAfterDays);
   enableReread = boolOption(uc.enableReread, enableReread);
@@ -262,27 +269,48 @@ async function resolveMediaId(c: AniListClient, entry: SyncEntry): Promise<numbe
 }
 
 /**
- * Resolve the progress count to push, in the configured unit.
+ * Resolve the progress count to push, in the configured unit. Two behaviours
+ * layer on top of the raw local book count:
  *
- * When completing a series that's finished publishing on AniList, fill the
- * progress to AniList's canonical total instead of the local book count — local
- * editions (omnibus/perfect) often bundle fewer "books" than AniList's
- * volume/chapter count, which would otherwise leave a completed series looking
- * half-read (e.g. 2/7). Only applies when AniList reports a total for the unit.
+ * - **Scale progress** (opt-in): map local progress proportionally onto
+ *   AniList's canonical total. An omnibus/perfect volume bundles several
+ *   canonical volumes, so reading 1 of 2 local books of a 7-volume series is
+ *   ~4/7. Needs both the Codex series total (from the payload) and AniList's
+ *   total; a no-op when they're equal. At 100% it yields the canonical total,
+ *   so it subsumes the fill below.
+ * - **Completed fill** (always-on): when completing a series that's finished
+ *   publishing on AniList, push its canonical total instead of the local count,
+ *   so a finished local edition isn't left looking half-read (e.g. 2/7).
  */
 function resolveProgressCount(
   unit: ProgressUnit,
-  reportedCount: number | undefined,
+  progress: SyncProgress | undefined,
   decidedStatus: string,
   remote: RemoteEntry | undefined,
+  scale: boolean,
 ): number | undefined {
-  const total = unit === "chapters" ? remote?.mediaChapters : remote?.mediaVolumes;
+  const reportedCount = progress?.volumes ?? progress?.chapters;
+  const canonicalTotal = unit === "chapters" ? remote?.mediaChapters : remote?.mediaVolumes;
+  const codexTotal = unit === "chapters" ? progress?.totalChapters : progress?.totalVolumes;
+
+  if (
+    scale &&
+    reportedCount !== undefined &&
+    canonicalTotal !== undefined &&
+    canonicalTotal > 0 &&
+    codexTotal !== undefined &&
+    codexTotal > 0
+  ) {
+    const scaled = Math.round((reportedCount / codexTotal) * canonicalTotal);
+    return Math.min(Math.max(scaled, 0), canonicalTotal);
+  }
+
   const completingFinishedSeries =
     decidedStatus === "COMPLETED" &&
     remote?.mediaStatus === "FINISHED" &&
-    total !== undefined &&
-    total > 0;
-  return completingFinishedSeries ? total : reportedCount;
+    canonicalTotal !== undefined &&
+    canonicalTotal > 0;
+  return completingFinishedSeries ? canonicalTotal : reportedCount;
 }
 
 /** Build the AniList `SaveMediaListEntry` input for one resolved entry. */
@@ -300,8 +328,13 @@ function buildSaveInput(
   };
   if (decision.repeat !== undefined) input.repeat = decision.repeat;
 
-  const reportedCount = entry.progress?.volumes ?? entry.progress?.chapters;
-  const count = resolveProgressCount(progressUnit, reportedCount, decision.status, remote);
+  const count = resolveProgressCount(
+    progressUnit,
+    entry.progress,
+    decision.status,
+    remote,
+    scaleProgress,
+  );
   if (count !== undefined) {
     if (progressUnit === "chapters") input.progress = count;
     else input.progressVolumes = count;
@@ -470,8 +503,8 @@ createSyncPlugin({
     if (params.userConfig) {
       applyUserConfig(params.userConfig);
       logger.info(
-        `Plugin config: progressUnit=${progressUnit}, pauseAfterDays=${pauseAfterDays}, ` +
-          `dropAfterDays=${dropAfterDays}, enableReread=${enableReread}, ` +
+        `Plugin config: progressUnit=${progressUnit}, scaleProgress=${scaleProgress}, ` +
+          `pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, enableReread=${enableReread}, ` +
           `rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, ` +
           `private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
       );

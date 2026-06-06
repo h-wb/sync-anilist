@@ -39,6 +39,15 @@ export const manifest = {
         default: "volumes",
       },
       {
+        key: "scaleProgress",
+        label: "Scale Progress to AniList Total",
+        description:
+          "Opt-in. Map local progress proportionally onto AniList's total — useful for omnibus/perfect editions that bundle several canonical volumes per book (e.g. reading 1 of 2 local books of a 7-volume series pushes ~4/7). Needs the series' Codex volume/chapter total to match your local edition. No-op when your total already matches AniList's. Off = push the raw local count.",
+        type: "boolean" as const,
+        required: false,
+        default: false,
+      },
+      {
         key: "enableReread",
         label: "Detect Rereads (AniList REPEATING)",
         description:

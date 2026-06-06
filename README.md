@@ -15,7 +15,7 @@ The Codex-facing plugin name is still `sync-anilist`, so it drops into Codex exa
    - **Name**: `sync-anilist`
    - **Display Name**: `AniList Sync`
    - **Command**: `npx`
-   - **Arguments**: `-y https://github.com/h-wb/sync-anilist/releases/download/v1.1.0/h-wb-sync-anilist-1.1.0.tgz`  *(bump the version in the URL to upgrade)*
+   - **Arguments**: `-y https://github.com/h-wb/sync-anilist/releases/download/v1.2.0/h-wb-sync-anilist-1.2.0.tgz`  *(bump the version in the URL to upgrade)*
 3. **Save**, then **Test Connection**.
 
 > Installed from a prebuilt tarball attached to a GitHub Release — **no npm account, no registry, and no `git` on the host** (`npx github:…` needs git, which many container images lack). The tarball is self-contained (the SDK is bundled in); the host just needs Node 22+. The URL is versioned — change the version to upgrade.
@@ -35,6 +35,22 @@ Each instance only ever receives the series in its own library, so the units nev
 Local editions (omnibus, *perfect*, *kanzenban*) often bundle the work into fewer "books" than AniList's canonical count — e.g. *Nausicaä* perfect edition is 2 volumes locally but 7 on AniList. When you finish such a series, pushing the local count would leave it showing **Completed, 2/7**.
 
 So when a series is marked **completed** in Codex *and* its AniList media is **finished publishing**, the plugin fills the progress to AniList's **canonical total** (7/7) instead of the local count. Guards: only on completion, only for finished-publishing media, and only when AniList actually reports a total for the unit (many manga have no chapter count — then the number is left as-is, but the status is still `COMPLETED`). On the *first* push of a brand-new series it isn't on your AniList list yet so the total is unknown; it settles to the full count on the next sync. This needs no setting — it's always on.
+
+### Proportional progress while reading (`scaleProgress`)
+
+The completed-fill above only kicks in at 100%. To also show meaningful **in-progress** numbers for those bundled editions, turn on **Scale Progress to AniList Total** (opt-in, off by default). It maps your local progress proportionally onto AniList's total:
+
+```
+anilistProgress = round(localRead / codexTotal × canonicalTotal)
+```
+
+For the *Nausicaä* perfect edition (2 local volumes → 7 on AniList), reading **1 of 2** pushes **~4/7**, and **2 of 2** pushes **7/7** (i.e. the completed-fill is just the 100% case). This is accurate, not a guess — a perfect-edition volume really does contain several canonical volumes.
+
+Requirements & notes:
+- Set the series' Codex **volume/chapter total to match your local edition** (e.g. 2 for the perfect edition) and **lock** that metadata field — that's what `codexTotal` reads from. A metadata rescan can otherwise revert it.
+- **No-op when the totals already match** (you own every volume), so it only affects bundled editions.
+- Needs AniList to report a total for the unit; otherwise it falls back to the raw local count.
+- It does **not** fix a partial library that starts mid-series (e.g. *One Piece* from chapter 950): the proportional model assumes you start from the beginning. That case needs Codex to send the actual chapter number, which it currently doesn't.
 
 ## Reread (AniList `REPEATING`)
 
