@@ -16,10 +16,8 @@ The Codex-facing plugin name is still `sync-anilist`, so it drops into Codex exa
    - **Name**: `sync-anilist`
    - **Display Name**: `AniList Sync`
    - **Command**: `npx`
-   - **Arguments**: `-y github:h-wb/sync-anilist`  *(pin a tag for stability, e.g. `-y github:h-wb/sync-anilist#v1.0.0`)*
+   - **Arguments**: `-y @h-wb/sync-anilist`  *(pin a version for production, e.g. `-y @h-wb/sync-anilist@1.0.0`)*
 3. **Save**, then **Test Connection**.
-
-> Installed straight from this public GitHub repo — no npm account or registry needed. `npx` clones the repo and runs the `prepare` build (`esbuild`) on first install, then caches it. Node 22+ must be available to the Codex host (the plugin already requires it).
 4. Connect your AniList account in **Settings → Integrations** (OAuth or a personal access token — see the [AniList developer settings](https://anilist.co/settings/developer)).
 
 ## Per-series unit (volumes vs chapters)
@@ -88,16 +86,14 @@ npm run build   # esbuild bundle -> dist/index.js
 
 To run a local build in Codex, point the plugin **Command** at `node` and **Arguments** at the absolute path to `dist/index.js`.
 
-## Releasing
+## Publishing
 
-No npm registry is used — installs come straight from this GitHub repo. CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests, and build on every push/PR. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds and creates a **GitHub Release** with `dist/index.js` attached (uses the built-in `GITHUB_TOKEN` — no secrets required).
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests, and build on every push/PR. Pushing a `v*` tag triggers `.github/workflows/release.yml`, which publishes to npm (requires an `NPM_TOKEN` repo secret).
 
 ```bash
 npm version patch    # or minor/major — creates the commit + tag
 git push --follow-tags
 ```
-
-Pin to a tag from Codex with `-y github:h-wb/sync-anilist#v1.0.0`. Or download `dist/index.js` from a Release and run it directly: Codex **Command** `node`, **Arguments** the path to that file.
 
 ## License
 
