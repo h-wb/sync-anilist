@@ -20,8 +20,11 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: npm run build
-      - name: Create GitHub Release with built bundle
+      # npm pack runs `prepare` (esbuild build) and produces a self-contained,
+      # installable tarball — no git or npm registry needed to consume it.
+      - name: Pack installable tarball
+        run: echo "TARBALL=$(npm pack | tail -1)" >> "$GITHUB_ENV"
+      - name: Create GitHub Release with the tarball
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/index.js --generate-notes --title "$GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" "$TARBALL" --generate-notes --title "$GITHUB_REF_NAME"
