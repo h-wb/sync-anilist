@@ -64,6 +64,7 @@ const MANGA_LIST_QUERY = `
         updatedAt
         media {
           id
+          status
           title {
             romaji
             english
@@ -164,6 +165,7 @@ export interface AniListMediaListEntry {
   updatedAt: number;
   media: {
     id: number;
+    status?: string;
     title: { romaji?: string; english?: string; native?: string };
     siteUrl: string;
   };

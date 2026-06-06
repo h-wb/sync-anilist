@@ -181,19 +181,28 @@ export function decideStatus(
   recent: boolean,
   enabled: boolean,
   currentRepeat: number,
+  mediaStatus?: string,
 ): RereadDecision {
   const base = syncStatusToAnilist(codexStatus);
+  // Force completed when the AniList media is finished (highest priority)
+  if (codexStatus === "completed" && mediaStatus === "FINISHED") {
+    return { status: "COMPLETED" };
+  }
+  // If reread handling is disabled or there's no AniList entry, return base mapping
   if (!enabled || !anilistStatus) return { status: base };
 
+  // REPEATING on AniList: reading -> REPEATING, completed -> finish reread
+  if (anilistStatus === "REPEATING") {
+    return codexStatus === "completed"
+      ? { status: "COMPLETED", repeat: currentRepeat + 1 }
+      : { status: "REPEATING" };
+  }
+
+  // reading + AniList COMPLETED + recent -> REPEATING
   if (codexStatus === "reading" && anilistStatus === "COMPLETED" && recent) {
     return { status: "REPEATING" };
   }
-  if (codexStatus === "reading" && anilistStatus === "REPEATING") {
-    return { status: "REPEATING" };
-  }
-  if (codexStatus === "completed" && anilistStatus === "REPEATING") {
-    return { status: "COMPLETED", repeat: currentRepeat + 1 };
-  }
+
   return { status: base };
 }
 
@@ -231,7 +240,7 @@ export const provider: SyncProvider = {
     // current AniList status/progress/repeat (needed for reread detection).
     const existing = new Map<
       number,
-      { status: string; progress: number; progressVolumes: number; repeat: number }
+      { status: string; progress: number; progressVolumes: number; repeat: number; mediaStatus?: string }
     >();
     let page = 1;
     let hasMore = true;
@@ -243,6 +252,7 @@ export const provider: SyncProvider = {
           progress: e.progress,
           progressVolumes: e.progressVolumes,
           repeat: e.repeat ?? 0,
+          mediaStatus: e.media?.status,
         });
       }
       hasMore = result.pageInfo.hasNextPage;
@@ -304,6 +314,7 @@ export const provider: SyncProvider = {
           recent,
           enableReread,
           ani?.repeat ?? 0,
+          ani?.mediaStatus,
         );
 
         const saveParams: {
@@ -368,6 +379,7 @@ export const provider: SyncProvider = {
           progress: saveParams.progress ?? ani?.progress ?? 0,
           progressVolumes: saveParams.progressVolumes ?? ani?.progressVolumes ?? 0,
           repeat: decision.repeat ?? ani?.repeat ?? 0,
+          mediaStatus: ani?.mediaStatus,
         });
 
         success.push({
