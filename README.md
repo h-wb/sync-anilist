@@ -31,12 +31,13 @@ Each Codex book is one "unit". By default everything maps to AniList **volumes**
 `[unit:volumes]` is also accepted to force volumes explicitly. The default for unmarked series is the **Default Progress Unit** plugin setting.
 
 Requirements & guarantees:
+- **Opt-in:** turn on the **Per-Series Unit From Notes** plugin setting (off by default — with it off the plugin uses the global unit, exactly like upstream).
 - Turn **Sync Ratings & Notes** ON (in the shared Sync Settings) so notes reach the plugin.
-- The marker is **only** read for routing — it is **never** pushed to AniList, and the plugin never imports AniList notes back into Codex (so it can't clobber your marker).
+- While enabled, the marker is **only** read for routing — it is **never** pushed to AniList, and the plugin never imports AniList notes back into Codex (so it can't clobber your marker).
 
 ## Reread (AniList `REPEATING`)
 
-Codex has no concept of rereading, but AniList does. This plugin infers it:
+Codex has no concept of rereading, but AniList does. This plugin can infer it — **opt-in via the Detect Rereads setting** (off by default):
 
 | Codex says | AniList currently | Result pushed |
 |---|---|---|
@@ -55,8 +56,9 @@ Use **Push Only** (Settings → Integrations → Settings). Codex is the source 
 
 | Setting | Default | Description |
 |---|---|---|
-| Default Progress Unit | `volumes` | Fallback unit for series with no `[unit:*]` marker |
-| Detect Rereads | `on` | Enable AniList `REPEATING` handling |
+| Default Progress Unit | `volumes` | Unit used for all series (and the fallback when a `[unit:*]` marker is absent) |
+| Per-Series Unit From Notes | `off` | Opt-in: honor `[unit:*]` markers in notes (and stop syncing notes both ways) |
+| Detect Rereads | `off` | Opt-in: enable AniList `REPEATING` handling |
 | Reread Activity Window (days) | `90` | Only treat COMPLETED-on-AniList series as rereads with activity inside this window |
 | Auto-Pause After Days | `0` (off) | Set in-progress series to Paused after inactivity |
 | Auto-Drop After Days | `0` (off) | Set in-progress series to Dropped after inactivity |
