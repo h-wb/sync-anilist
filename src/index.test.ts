@@ -1,38 +1,58 @@
+import type { SyncEntry } from "@ashdev/codex-plugin-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AniListClient } from "./anilist.js";
 import {
   applyStaleness,
   decideStatus,
-  detectUnit,
   isRecentActivity,
   provider,
   setClient,
   setHiddenFromStatusLists,
   setPrivateMode,
+  setProgressUnit,
   setSearchFallback,
   setViewerId,
 } from "./index.js";
 
 // =============================================================================
-// detectUnit Tests
+// Shared test helpers
 // =============================================================================
 
-describe("detectUnit", () => {
-  it("returns the fallback when notes are empty or undefined", () => {
-    expect(detectUnit(undefined, "volumes")).toBe("volumes");
-    expect(detectUnit("", "chapters")).toBe("chapters");
-    expect(detectUnit("just a normal note", "volumes")).toBe("volumes");
-  });
+/** A `getMangaList` resolved value wrapping a single page of entries. */
+function mangaListPage(entries: unknown[] = []) {
+  return {
+    pageInfo: { total: entries.length, currentPage: 1, lastPage: 1, hasNextPage: false },
+    entries,
+  };
+}
 
-  it("routes to chapters when the marker is present (case-insensitive)", () => {
-    expect(detectUnit("[unit:chapters]", "volumes")).toBe("chapters");
-    expect(detectUnit("my note [Unit:Chapters] here", "volumes")).toBe("chapters");
-  });
+/** A fake AniListClient with sensible defaults, overridable per test. */
+function makeMockClient(overrides?: {
+  searchManga?: AniListClient["searchManga"];
+  saveEntry?: AniListClient["saveEntry"];
+  getMangaList?: AniListClient["getMangaList"];
+}): AniListClient {
+  return {
+    getViewer: vi.fn(),
+    getMangaList: overrides?.getMangaList ?? vi.fn().mockResolvedValue(mangaListPage()),
+    saveEntry:
+      overrides?.saveEntry ??
+      vi.fn().mockResolvedValue({
+        id: 1,
+        mediaId: 42,
+        status: "CURRENT",
+        score: 0,
+        progress: 0,
+        progressVolumes: 1,
+      }),
+    searchManga: overrides?.searchManga ?? vi.fn().mockResolvedValue(null),
+  } as unknown as AniListClient;
+}
 
-  it("routes to volumes when the volumes marker is present", () => {
-    expect(detectUnit("[unit:volumes]", "chapters")).toBe("volumes");
-  });
-});
+/** The input passed to the `call`-th `saveEntry` invocation. */
+function saveArgs(client: AniListClient, call = 0) {
+  return (client.saveEntry as ReturnType<typeof vi.fn>).mock.calls[call][0];
+}
 
 // =============================================================================
 // isRecentActivity Tests
@@ -196,33 +216,6 @@ describe("applyStaleness", () => {
 // =============================================================================
 
 describe("pushProgress searchFallback", () => {
-  function makeMockClient(overrides?: {
-    searchManga?: AniListClient["searchManga"];
-    saveEntry?: AniListClient["saveEntry"];
-    getMangaList?: AniListClient["getMangaList"];
-  }) {
-    return {
-      getViewer: vi.fn(),
-      getMangaList:
-        overrides?.getMangaList ??
-        vi.fn().mockResolvedValue({
-          pageInfo: { total: 0, currentPage: 1, lastPage: 1, hasNextPage: false },
-          entries: [],
-        }),
-      saveEntry:
-        overrides?.saveEntry ??
-        vi.fn().mockResolvedValue({
-          id: 1,
-          mediaId: 42,
-          status: "CURRENT",
-          score: 0,
-          progress: 0,
-          progressVolumes: 1,
-        }),
-      searchManga: overrides?.searchManga ?? vi.fn().mockResolvedValue(null),
-    } as unknown as AniListClient;
-  }
-
   afterEach(() => {
     setClient(null);
     setViewerId(null);
@@ -360,33 +353,7 @@ describe("pushProgress searchFallback", () => {
 // =============================================================================
 
 describe("pushProgress visibility params", () => {
-  function makeMockClient(overrides?: {
-    saveEntry?: AniListClient["saveEntry"];
-    getMangaList?: AniListClient["getMangaList"];
-  }) {
-    return {
-      getViewer: vi.fn(),
-      getMangaList:
-        overrides?.getMangaList ??
-        vi.fn().mockResolvedValue({
-          pageInfo: { total: 0, currentPage: 1, lastPage: 1, hasNextPage: false },
-          entries: [],
-        }),
-      saveEntry:
-        overrides?.saveEntry ??
-        vi.fn().mockResolvedValue({
-          id: 1,
-          mediaId: 42,
-          status: "CURRENT",
-          score: 0,
-          progress: 0,
-          progressVolumes: 1,
-        }),
-      searchManga: vi.fn().mockResolvedValue(null),
-    } as unknown as AniListClient;
-  }
-
-  let mockClient: ReturnType<typeof makeMockClient>;
+  let mockClient: AniListClient;
 
   beforeEach(() => {
     mockClient = makeMockClient();
@@ -413,7 +380,7 @@ describe("pushProgress visibility params", () => {
     });
 
     expect(mockClient.saveEntry).toHaveBeenCalledOnce();
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.private).toBe(true);
     expect(args.hiddenFromStatusLists).toBe(false);
   });
@@ -434,12 +401,12 @@ describe("pushProgress visibility params", () => {
     });
 
     expect(mockClient.saveEntry).toHaveBeenCalledOnce();
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.mediaId).toBe(42);
     expect(args.status).toBe("COMPLETED");
     expect(args.private).toBe(true);
     expect(args.hiddenFromStatusLists).toBe(false);
-    // Default behavior is upstream: notes are pushed (notesUnit is off).
+    // Notes are pushed (upstream behavior).
     expect(args.notes).toBe("Great manga");
   });
 
@@ -454,7 +421,7 @@ describe("pushProgress visibility params", () => {
 
     expect(mockClient.saveEntry).toHaveBeenCalledTimes(3);
     for (let i = 0; i < 3; i++) {
-      const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[i][0];
+      const args = saveArgs(mockClient, i);
       expect(args.private).toBe(true);
       expect(args.hiddenFromStatusLists).toBe(false);
     }
@@ -473,7 +440,7 @@ describe("pushProgress visibility params", () => {
       ],
     });
 
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.private).toBe(false);
     expect(args.hiddenFromStatusLists).toBe(false);
   });
@@ -491,7 +458,7 @@ describe("pushProgress visibility params", () => {
       ],
     });
 
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.private).toBe(true);
     expect(args.hiddenFromStatusLists).toBe(true);
   });
@@ -510,7 +477,7 @@ describe("pushProgress visibility params", () => {
       ],
     });
 
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.private).toBe(false);
     expect(args.hiddenFromStatusLists).toBe(true);
   });
@@ -529,8 +496,75 @@ describe("pushProgress visibility params", () => {
       ],
     });
 
-    const args = (mockClient.saveEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const args = saveArgs(mockClient);
     expect(args.private).toBe(true);
     expect(args.hiddenFromStatusLists).toBe(true);
+  });
+});
+
+// =============================================================================
+// pushProgress — canonical-total fill on completion Tests
+// =============================================================================
+
+describe("pushProgress completed-total fill", () => {
+  // A client whose remote list is a single entry with the given media fields.
+  const clientWithMedia = (media: Record<string, unknown>, status = "CURRENT") =>
+    makeMockClient({
+      getMangaList: vi.fn().mockResolvedValue(mangaListPage([{ mediaId: 42, status, media }])),
+    });
+
+  afterEach(() => {
+    setClient(null);
+    setViewerId(null);
+    setProgressUnit("volumes"); // restore default
+  });
+
+  function pushOne(client: AniListClient, entry: SyncEntry) {
+    setClient(client);
+    setViewerId(1);
+    return provider.pushProgress({ entries: [entry] });
+  }
+
+  it("fills volumes to AniList's canonical total when completing a finished series", async () => {
+    // Nausicaä perfect edition: 2 local books, AniList canonical total 7.
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, { externalId: "42", status: "completed", progress: { volumes: 2 } });
+
+    const args = saveArgs(client);
+    expect(args.status).toBe("COMPLETED");
+    expect(args.progressVolumes).toBe(7);
+  });
+
+  it("fills chapters to the canonical total when the unit is chapters", async () => {
+    setProgressUnit("chapters");
+    const client = clientWithMedia({ status: "FINISHED", chapters: 60 });
+    await pushOne(client, { externalId: "42", status: "completed", progress: { chapters: 12 } });
+
+    const args = saveArgs(client);
+    expect(args.status).toBe("COMPLETED");
+    expect(args.progress).toBe(60);
+  });
+
+  it("does not fill when the series is still publishing (RELEASING)", async () => {
+    const client = clientWithMedia({ status: "RELEASING", volumes: 7 });
+    await pushOne(client, { externalId: "42", status: "completed", progress: { volumes: 2 } });
+
+    expect(saveArgs(client).progressVolumes).toBe(2);
+  });
+
+  it("does not fill when AniList has no total for the unit", async () => {
+    const client = clientWithMedia({ status: "FINISHED", volumes: null });
+    await pushOne(client, { externalId: "42", status: "completed", progress: { volumes: 2 } });
+
+    expect(saveArgs(client).progressVolumes).toBe(2);
+  });
+
+  it("does not fill for a non-completed status", async () => {
+    const client = clientWithMedia({ status: "FINISHED", volumes: 7 });
+    await pushOne(client, { externalId: "42", status: "reading", progress: { volumes: 2 } });
+
+    const args = saveArgs(client);
+    expect(args.status).toBe("CURRENT");
+    expect(args.progressVolumes).toBe(2);
   });
 });

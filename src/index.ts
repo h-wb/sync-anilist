@@ -1,14 +1,14 @@
 /**
  * AniList Sync Plugin for Codex
  *
- * Syncs manga reading progress between Codex and AniList.
- * Communicates via JSON-RPC over stdio using the Codex plugin SDK.
+ * Syncs manga reading progress between Codex and AniList over JSON-RPC (stdio),
+ * using the Codex plugin SDK.
  *
  * Capabilities:
  * - Push reading progress from Codex to AniList
  * - Pull reading progress from AniList to Codex
- * - Get user info from AniList
- * - Status reporting for sync state
+ * - Report the authenticated AniList user
+ * - Report sync status
  */
 
 import {
@@ -27,69 +27,99 @@ import {
 } from "@ashdev/codex-plugin-sdk";
 import {
   AniListClient,
-  type AniListFuzzyDate,
   anilistStatusToSync,
   convertScoreFromAnilist,
   convertScoreToAnilist,
   fuzzyDateToIso,
   isoToFuzzyDate,
+  type SaveEntryInput,
   syncStatusToAnilist,
 } from "./anilist.js";
 import { manifest } from "./manifest.js";
 
 const logger = createLogger({ name: "sync-anilist", level: "debug" });
 
-// Plugin state (set during initialization)
+const DAY_MS = 1000 * 60 * 60 * 24;
+/** Max page size AniList allows for the manga-list query. */
+const PAGE_SIZE = 50;
+
+type ProgressUnit = "volumes" | "chapters";
+
+// =============================================================================
+// Connection state (set when the plugin authenticates)
+// =============================================================================
+
 let client: AniListClient | null = null;
 let viewerId: number | null = null;
 let scoreFormat = "POINT_10";
 
-// Plugin-specific config (from userConfig, set during initialization)
-let progressUnit: "volumes" | "chapters" = "volumes";
+// =============================================================================
+// Configuration (from userConfig, applied during initialization)
+// =============================================================================
+
+let progressUnit: ProgressUnit = "volumes";
 let pauseAfterDays = 0;
 let dropAfterDays = 0;
-// Custom features — both OFF by default so the plugin behaves like upstream.
-let notesUnit = false;
+/** Reread detection — OFF by default so the plugin behaves like upstream. */
 let enableReread = false;
 let rereadRecentDays = 90;
 let searchFallback = false;
 let privateMode = true;
 let hiddenFromStatusLists = false;
 
-/** Set the AniList client (exported for testing) */
-export function setClient(c: AniListClient | null): void {
+// Test seams — let unit tests drive state without a live connection/config.
+/** @internal */ export function setClient(c: AniListClient | null): void {
   client = c;
 }
-
-/** Set the viewer ID (exported for testing) */
-export function setViewerId(id: number | null): void {
+/** @internal */ export function setViewerId(id: number | null): void {
   viewerId = id;
 }
-
-/** Set the searchFallback flag (exported for testing) */
-export function setSearchFallback(enabled: boolean): void {
+/** @internal */ export function setProgressUnit(unit: ProgressUnit): void {
+  progressUnit = unit;
+}
+/** @internal */ export function setSearchFallback(enabled: boolean): void {
   searchFallback = enabled;
 }
-
-/** Set the privateMode flag (exported for testing) */
-export function setPrivateMode(enabled: boolean): void {
+/** @internal */ export function setPrivateMode(enabled: boolean): void {
   privateMode = enabled;
 }
-
-/** Set the hiddenFromStatusLists flag (exported for testing) */
-export function setHiddenFromStatusLists(enabled: boolean): void {
+/** @internal */ export function setHiddenFromStatusLists(enabled: boolean): void {
   hiddenFromStatusLists = enabled;
 }
 
+/** Read a boolean userConfig option, falling back when it's absent/invalid. */
+function boolOption(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+/** Read a non-negative number userConfig option, falling back otherwise. */
+function numberOption(value: unknown, fallback: number): number {
+  return typeof value === "number" && value >= 0 ? value : fallback;
+}
+
+/** Apply the user's plugin settings to module configuration. */
+function applyUserConfig(uc: Record<string, unknown>): void {
+  if (uc.progressUnit === "chapters" || uc.progressUnit === "volumes") {
+    progressUnit = uc.progressUnit;
+  }
+  pauseAfterDays = numberOption(uc.pauseAfterDays, pauseAfterDays);
+  dropAfterDays = numberOption(uc.dropAfterDays, dropAfterDays);
+  enableReread = boolOption(uc.enableReread, enableReread);
+  rereadRecentDays = numberOption(uc.rereadRecentDays, rereadRecentDays);
+  searchFallback = boolOption(uc.searchFallback, searchFallback);
+  privateMode = boolOption(uc.private, privateMode);
+  hiddenFromStatusLists = boolOption(uc.hiddenFromStatusLists, hiddenFromStatusLists);
+}
+
 // =============================================================================
-// Staleness Logic
+// Staleness (auto-pause / auto-drop)
 // =============================================================================
 
 /**
- * Apply auto-pause/auto-drop for stale in-progress entries.
+ * Downgrade a stale in-progress entry to Paused or Dropped.
  *
- * Only applies to "reading" entries. Drop takes priority over pause
- * when both thresholds are met. A threshold of 0 means disabled.
+ * Only applies to "reading" entries. Drop takes priority over pause when both
+ * thresholds are met. A threshold of 0 disables that action.
  */
 export function applyStaleness(
   status: SyncEntry["status"],
@@ -105,44 +135,17 @@ export function applyStaleness(
   const lastActivity = new Date(latestUpdatedAt).getTime();
   if (Number.isNaN(lastActivity)) return status;
 
-  const currentTime = now ?? Date.now();
-  const daysInactive = Math.max(0, (currentTime - lastActivity) / (1000 * 60 * 60 * 24));
+  const daysInactive = Math.max(0, ((now ?? Date.now()) - lastActivity) / DAY_MS);
 
-  // Drop takes priority (stronger action)
-  if (dropDays > 0 && daysInactive >= dropDays) {
-    return "dropped";
-  }
-  if (pauseDays > 0 && daysInactive >= pauseDays) {
-    return "on_hold";
-  }
-
+  // Drop takes priority (stronger action).
+  if (dropDays > 0 && daysInactive >= dropDays) return "dropped";
+  if (pauseDays > 0 && daysInactive >= pauseDays) return "on_hold";
   return status;
 }
 
 // =============================================================================
-// Per-series unit & reread helpers
+// Reread detection (AniList REPEATING)
 // =============================================================================
-
-const UNIT_CHAPTERS_RE = /\[unit:chapters\]/i;
-const UNIT_VOLUMES_RE = /\[unit:volumes\]/i;
-
-/**
- * Resolve the progress unit for a single series.
- *
- * A `[unit:chapters]` / `[unit:volumes]` marker in the Codex series notes
- * overrides the global default. The marker is only used for routing and is
- * never pushed back to AniList.
- */
-export function detectUnit(
-  notes: string | undefined,
-  fallback: "volumes" | "chapters",
-): "volumes" | "chapters" {
-  if (notes) {
-    if (UNIT_CHAPTERS_RE.test(notes)) return "chapters";
-    if (UNIT_VOLUMES_RE.test(notes)) return "volumes";
-  }
-  return fallback;
-}
 
 /** Whether a series has reading activity within `withinDays` of `now`. */
 export function isRecentActivity(
@@ -154,26 +157,26 @@ export function isRecentActivity(
   if (withinDays <= 0) return true;
   const t = new Date(latestUpdatedAt).getTime();
   if (Number.isNaN(t)) return false;
-  const currentTime = now ?? Date.now();
-  const daysSince = (currentTime - t) / (1000 * 60 * 60 * 24);
-  return daysSince <= withinDays;
+  return ((now ?? Date.now()) - t) / DAY_MS <= withinDays;
 }
 
-export interface RereadDecision {
-  /** AniList MediaListStatus to push */
+export interface StatusDecision {
+  /** AniList MediaListStatus to push. */
   status: string;
-  /** New repeat count, set only when a reread is being finished */
+  /** New repeat count — set only when a reread is being finished. */
   repeat?: number;
 }
 
 /**
  * Decide the AniList status to push, layering reread (REPEATING) handling on
- * top of the base status mapping. Codex has no concept of rereading, so we
- * infer it from the AniList side:
+ * top of the plain status mapping. Codex has no concept of rereading, so we
+ * infer it from the series' current AniList status:
  *
- * - Codex reading + AniList COMPLETED + recent activity -> REPEATING (reread started)
- * - Codex reading + AniList REPEATING                   -> REPEATING (reread continues)
- * - Codex completed + AniList REPEATING                 -> COMPLETED + repeat+1 (reread done)
+ * - Codex reading  + AniList COMPLETED + recent activity -> REPEATING (reread started)
+ * - Codex reading  + AniList REPEATING                   -> REPEATING (reread continues)
+ * - Codex completed + AniList REPEATING                  -> COMPLETED + repeat+1 (reread done)
+ *
+ * With reread disabled, or no existing AniList entry, this is the plain mapping.
  */
 export function decideStatus(
   codexStatus: string,
@@ -181,24 +184,16 @@ export function decideStatus(
   recent: boolean,
   enabled: boolean,
   currentRepeat: number,
-  mediaStatus?: string,
-): RereadDecision {
+): StatusDecision {
   const base = syncStatusToAnilist(codexStatus);
-  // Force completed when the AniList media is finished (highest priority)
-  if (codexStatus === "completed" && mediaStatus === "FINISHED") {
-    return { status: "COMPLETED" };
-  }
-  // If reread handling is disabled or there's no AniList entry, return base mapping
   if (!enabled || !anilistStatus) return { status: base };
 
-  // REPEATING on AniList: reading -> REPEATING, completed -> finish reread
   if (anilistStatus === "REPEATING") {
     return codexStatus === "completed"
       ? { status: "COMPLETED", repeat: currentRepeat + 1 }
       : { status: "REPEATING" };
   }
 
-  // reading + AniList COMPLETED + recent -> REPEATING
   if (codexStatus === "reading" && anilistStatus === "COMPLETED" && recent) {
     return { status: "REPEATING" };
   }
@@ -207,20 +202,131 @@ export function decideStatus(
 }
 
 // =============================================================================
-// Sync Provider Implementation
+// Push helpers
 // =============================================================================
 
-/** Exported for testing */
+/** The slice of a remote AniList entry we need while pushing. */
+interface RemoteEntry {
+  status: string;
+  progress: number;
+  progressVolumes: number;
+  repeat: number;
+  /** Media publishing status, e.g. "FINISHED". */
+  mediaStatus?: string;
+  /** Canonical total volumes/chapters (undefined when AniList doesn't track it). */
+  mediaVolumes?: number;
+  mediaChapters?: number;
+}
+
+/** Fetch the viewer's entire AniList manga list, keyed by media id. */
+async function fetchRemoteEntries(
+  c: AniListClient,
+  userId: number,
+): Promise<Map<number, RemoteEntry>> {
+  const entries = new Map<number, RemoteEntry>();
+  for (let page = 1; ; page++) {
+    const { entries: list, pageInfo } = await c.getMangaList(userId, page, PAGE_SIZE);
+    for (const e of list) {
+      entries.set(e.mediaId, {
+        status: e.status,
+        progress: e.progress,
+        progressVolumes: e.progressVolumes,
+        repeat: e.repeat ?? 0,
+        mediaStatus: e.media?.status,
+        mediaVolumes: e.media?.volumes ?? undefined,
+        mediaChapters: e.media?.chapters ?? undefined,
+      });
+    }
+    if (!pageInfo.hasNextPage) break;
+  }
+  return entries;
+}
+
+/**
+ * Resolve an entry's AniList media id. Uses the numeric external id when
+ * present, otherwise falls back to a title search when that's enabled.
+ * Returns null when no id can be determined.
+ */
+async function resolveMediaId(c: AniListClient, entry: SyncEntry): Promise<number | null> {
+  const parsed = Number.parseInt(entry.externalId, 10);
+  if (!Number.isNaN(parsed)) return parsed;
+
+  if (searchFallback && entry.title) {
+    const match = await c.searchManga(entry.title);
+    if (match) {
+      logger.info(`Search fallback resolved "${entry.title}" → AniList ID ${match.id}`);
+      return match.id;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve the progress count to push, in the configured unit.
+ *
+ * When completing a series that's finished publishing on AniList, fill the
+ * progress to AniList's canonical total instead of the local book count — local
+ * editions (omnibus/perfect) often bundle fewer "books" than AniList's
+ * volume/chapter count, which would otherwise leave a completed series looking
+ * half-read (e.g. 2/7). Only applies when AniList reports a total for the unit.
+ */
+function resolveProgressCount(
+  unit: ProgressUnit,
+  reportedCount: number | undefined,
+  decidedStatus: string,
+  remote: RemoteEntry | undefined,
+): number | undefined {
+  const total = unit === "chapters" ? remote?.mediaChapters : remote?.mediaVolumes;
+  const completingFinishedSeries =
+    decidedStatus === "COMPLETED" &&
+    remote?.mediaStatus === "FINISHED" &&
+    total !== undefined &&
+    total > 0;
+  return completingFinishedSeries ? total : reportedCount;
+}
+
+/** Build the AniList `SaveMediaListEntry` input for one resolved entry. */
+function buildSaveInput(
+  entry: SyncEntry,
+  mediaId: number,
+  decision: StatusDecision,
+  remote: RemoteEntry | undefined,
+): SaveEntryInput {
+  const input: SaveEntryInput = {
+    mediaId,
+    status: decision.status,
+    private: privateMode,
+    hiddenFromStatusLists,
+  };
+  if (decision.repeat !== undefined) input.repeat = decision.repeat;
+
+  const reportedCount = entry.progress?.volumes ?? entry.progress?.chapters;
+  const count = resolveProgressCount(progressUnit, reportedCount, decision.status, remote);
+  if (count !== undefined) {
+    if (progressUnit === "chapters") input.progress = count;
+    else input.progressVolumes = count;
+  }
+
+  if (entry.score !== undefined) input.score = convertScoreToAnilist(entry.score, scoreFormat);
+  if (entry.startedAt) input.startedAt = isoToFuzzyDate(entry.startedAt);
+  if (entry.completedAt) input.completedAt = isoToFuzzyDate(entry.completedAt);
+  if (entry.notes !== undefined) input.notes = entry.notes;
+
+  return input;
+}
+
+// =============================================================================
+// Sync provider
+// =============================================================================
+
+/** @internal exported for testing */
 export const provider: SyncProvider = {
   async getUserInfo(): Promise<ExternalUserInfo> {
-    if (!client) {
-      throw new Error("Plugin not initialized - no AniList client");
-    }
+    if (!client) throw new Error("Plugin not initialized - no AniList client");
 
     const viewer = await client.getViewer();
     viewerId = viewer.id;
     scoreFormat = viewer.mediaListOptions.scoreFormat;
-
     logger.info(`Authenticated as ${viewer.name} (id: ${viewer.id}, scoreFormat: ${scoreFormat})`);
 
     return {
@@ -236,170 +342,65 @@ export const provider: SyncProvider = {
       throw new Error("Plugin not initialized - call getUserInfo first");
     }
 
-    // Pre-fetch existing entries: distinguish created/updated AND read the
-    // current AniList status/progress/repeat (needed for reread detection).
-    const existing = new Map<
-      number,
-      {
-        status: string;
-        progress: number;
-        progressVolumes: number;
-        repeat: number;
-        mediaStatus?: string;
-      }
-    >();
-    let page = 1;
-    let hasMore = true;
-    while (hasMore) {
-      const result = await client.getMangaList(viewerId, page, 50);
-      for (const e of result.entries) {
-        existing.set(e.mediaId, {
-          status: e.status,
-          progress: e.progress,
-          progressVolumes: e.progressVolumes,
-          repeat: e.repeat ?? 0,
-          mediaStatus: e.media?.status,
-        });
-      }
-      hasMore = result.pageInfo.hasNextPage;
-      page++;
-    }
-
-    const nowMs = Date.now();
+    // Pre-fetch the remote list once: tells us created-vs-updated and supplies
+    // the current status/repeat (for reread) and canonical totals (for the fill).
+    const remoteEntries = await fetchRemoteEntries(client, viewerId);
+    const now = Date.now();
     const success: SyncEntryResult[] = [];
     const failed: SyncEntryResult[] = [];
 
     for (const entry of params.entries) {
       try {
-        let mediaId = Number.parseInt(entry.externalId, 10);
-        if (Number.isNaN(mediaId)) {
-          // Try search fallback if enabled and entry has a title
-          if (searchFallback && entry.title) {
-            const result = await client.searchManga(entry.title);
-            if (result) {
-              mediaId = result.id;
-              logger.info(`Search fallback resolved "${entry.title}" → AniList ID ${mediaId}`);
-            }
-          }
-
-          if (Number.isNaN(mediaId)) {
-            failed.push({
-              externalId: entry.externalId,
-              status: "failed",
-              error: searchFallback
-                ? `No AniList match found for "${entry.title || entry.externalId}"`
-                : `Invalid media ID: ${entry.externalId}`,
-            });
-            continue;
-          }
+        const mediaId = await resolveMediaId(client, entry);
+        if (mediaId === null) {
+          failed.push({
+            externalId: entry.externalId,
+            status: "failed",
+            error: searchFallback
+              ? `No AniList match found for "${entry.title || entry.externalId}"`
+              : `Invalid media ID: ${entry.externalId}`,
+          });
+          continue;
         }
 
-        // Apply staleness logic: auto-pause or auto-drop stale in-progress entries
-        const effectiveStatus = applyStaleness(
+        const status = applyStaleness(
           entry.status,
           entry.latestUpdatedAt,
           pauseAfterDays,
           dropAfterDays,
         );
-        if (effectiveStatus !== entry.status) {
-          logger.debug(
-            `Entry ${entry.externalId}: auto-${effectiveStatus === "dropped" ? "dropped" : "paused"} (was ${entry.status})`,
-          );
+        if (status !== entry.status) {
+          logger.debug(`Entry ${entry.externalId}: auto-${status} (was ${entry.status})`);
         }
 
-        // Per-series unit override via a [unit:*] notes marker — only when
-        // notesUnit is enabled. Otherwise this is the upstream global unit.
-        const unit = notesUnit ? detectUnit(entry.notes, progressUnit) : progressUnit;
-
-        // Reread detection layered on top of the base status mapping.
-        const ani = existing.get(mediaId);
-        const recent = isRecentActivity(entry.latestUpdatedAt, rereadRecentDays, nowMs);
+        const remote = remoteEntries.get(mediaId);
         const decision = decideStatus(
-          effectiveStatus,
-          ani?.status,
-          recent,
+          status,
+          remote?.status,
+          isRecentActivity(entry.latestUpdatedAt, rereadRecentDays, now),
           enableReread,
-          ani?.repeat ?? 0,
-          ani?.mediaStatus,
+          remote?.repeat ?? 0,
         );
+        const input = buildSaveInput(entry, mediaId, decision, remote);
 
-        const saveParams: {
-          mediaId: number;
-          status?: string;
-          score?: number;
-          progress?: number;
-          progressVolumes?: number;
-          repeat?: number;
-          startedAt?: AniListFuzzyDate;
-          completedAt?: AniListFuzzyDate;
-          notes?: string;
-          private?: boolean;
-          hiddenFromStatusLists?: boolean;
-        } = {
-          mediaId,
-          status: decision.status,
-          private: privateMode,
-          hiddenFromStatusLists,
-        };
-        if (decision.repeat !== undefined) {
-          saveParams.repeat = decision.repeat;
-        }
-
-        // Map the single Codex book count into the resolved unit's field.
-        const count = entry.progress?.volumes ?? entry.progress?.chapters;
-        if (count !== undefined) {
-          if (unit === "chapters") {
-            saveParams.progress = count;
-          } else {
-            saveParams.progressVolumes = count;
-          }
-        }
-
-        // Map score (convert from 1-100 scale to AniList format)
-        if (entry.score !== undefined) {
-          saveParams.score = convertScoreToAnilist(entry.score, scoreFormat);
-        }
-
-        // Map dates
-        if (entry.startedAt) {
-          saveParams.startedAt = isoToFuzzyDate(entry.startedAt);
-        }
-        if (entry.completedAt) {
-          saveParams.completedAt = isoToFuzzyDate(entry.completedAt);
-        }
-
-        // Map notes (upstream behavior). When notesUnit is enabled we skip
-        // this, since the notes may carry a [unit:*] marker we must not leak.
-        if (!notesUnit && entry.notes !== undefined) {
-          saveParams.notes = entry.notes;
-        }
-
-        const resolvedExternalId = String(mediaId);
-        const existed = existing.has(mediaId);
-        const result = await client.saveEntry(saveParams);
-        logger.debug(`Pushed entry ${resolvedExternalId}: unit=${unit} status=${result.status}`);
+        const existed = remoteEntries.has(mediaId);
+        const saved = await client.saveEntry(input);
+        logger.debug(`Pushed entry ${mediaId}: unit=${progressUnit} status=${saved.status}`);
 
         // Reflect the new state so later entries in the batch see it.
-        existing.set(mediaId, {
+        remoteEntries.set(mediaId, {
+          ...remote,
           status: decision.status,
-          progress: saveParams.progress ?? ani?.progress ?? 0,
-          progressVolumes: saveParams.progressVolumes ?? ani?.progressVolumes ?? 0,
-          repeat: decision.repeat ?? ani?.repeat ?? 0,
-          mediaStatus: ani?.mediaStatus,
+          progress: input.progress ?? remote?.progress ?? 0,
+          progressVolumes: input.progressVolumes ?? remote?.progressVolumes ?? 0,
+          repeat: decision.repeat ?? remote?.repeat ?? 0,
         });
 
-        success.push({
-          externalId: resolvedExternalId,
-          status: existed ? "updated" : "created",
-        });
+        success.push({ externalId: String(mediaId), status: existed ? "updated" : "created" });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         logger.error(`Failed to push entry ${entry.externalId}: ${message}`);
-        failed.push({
-          externalId: entry.externalId,
-          status: "failed",
-          error: message,
-        });
+        failed.push({ externalId: entry.externalId, status: "failed", error: message });
       }
     }
 
@@ -411,13 +412,11 @@ export const provider: SyncProvider = {
       throw new Error("Plugin not initialized - call getUserInfo first");
     }
 
-    // Parse pagination cursor (page number)
     const page = params.cursor ? Number.parseInt(params.cursor, 10) : 1;
-    const perPage = params.limit ? Math.min(params.limit, 50) : 50;
+    const perPage = params.limit ? Math.min(params.limit, PAGE_SIZE) : PAGE_SIZE;
+    const { entries: list, pageInfo } = await client.getMangaList(viewerId, page, perPage);
 
-    const result = await client.getMangaList(viewerId, page, perPage);
-
-    const entries: SyncEntry[] = result.entries.map((entry) => ({
+    const entries: SyncEntry[] = list.map((entry) => ({
       externalId: String(entry.mediaId),
       status: anilistStatusToSync(entry.status),
       progress: {
@@ -427,45 +426,32 @@ export const provider: SyncProvider = {
       score: entry.score > 0 ? convertScoreFromAnilist(entry.score, scoreFormat) : undefined,
       startedAt: fuzzyDateToIso(entry.startedAt),
       completedAt: fuzzyDateToIso(entry.completedAt),
-      // Skip note import only when notesUnit is on (so a pulled note can't
-      // clobber a [unit:*] marker). Otherwise upstream behavior.
-      notes: notesUnit ? undefined : entry.notes || undefined,
+      notes: entry.notes || undefined,
     }));
 
     logger.info(
-      `Pulled ${entries.length} entries (page ${result.pageInfo.currentPage}/${result.pageInfo.lastPage})`,
+      `Pulled ${entries.length} entries (page ${pageInfo.currentPage}/${pageInfo.lastPage})`,
     );
 
     return {
       entries,
-      nextCursor: result.pageInfo.hasNextPage ? String(result.pageInfo.currentPage + 1) : undefined,
-      hasMore: result.pageInfo.hasNextPage,
+      nextCursor: pageInfo.hasNextPage ? String(pageInfo.currentPage + 1) : undefined,
+      hasMore: pageInfo.hasNextPage,
     };
   },
 
   async status(): Promise<SyncStatusResponse> {
     if (!client || viewerId === null) {
-      return {
-        pendingPush: 0,
-        pendingPull: 0,
-        conflicts: 0,
-      };
+      return { pendingPush: 0, pendingPull: 0, conflicts: 0 };
     }
 
-    // Get total count from AniList
-    const result = await client.getMangaList(viewerId, 1, 1);
-
-    return {
-      externalCount: result.pageInfo.total,
-      pendingPush: 0,
-      pendingPull: 0,
-      conflicts: 0,
-    };
+    const { pageInfo } = await client.getMangaList(viewerId, 1, 1);
+    return { externalCount: pageInfo.total, pendingPush: 0, pendingPull: 0, conflicts: 0 };
   },
 };
 
 // =============================================================================
-// Plugin Initialization
+// Plugin bootstrap
 // =============================================================================
 
 createSyncPlugin({
@@ -473,7 +459,6 @@ createSyncPlugin({
   provider,
   logLevel: "debug",
   onInitialize(params: InitializeParams) {
-    // Get access token from credentials
     const accessToken = params.credentials?.access_token;
     if (accessToken) {
       client = new AniListClient(accessToken);
@@ -482,39 +467,13 @@ createSyncPlugin({
       logger.warn("No access token provided - sync operations will fail");
     }
 
-    // Read plugin-specific config from userConfig
-    const uc = params.userConfig;
-    if (uc) {
-      const unit = uc.progressUnit;
-      if (unit === "chapters" || unit === "volumes") {
-        progressUnit = unit;
-      }
-      if (typeof uc.pauseAfterDays === "number" && uc.pauseAfterDays >= 0) {
-        pauseAfterDays = uc.pauseAfterDays;
-      }
-      if (typeof uc.dropAfterDays === "number" && uc.dropAfterDays >= 0) {
-        dropAfterDays = uc.dropAfterDays;
-      }
-      if (typeof uc.notesUnit === "boolean") {
-        notesUnit = uc.notesUnit;
-      }
-      if (typeof uc.enableReread === "boolean") {
-        enableReread = uc.enableReread;
-      }
-      if (typeof uc.rereadRecentDays === "number" && uc.rereadRecentDays >= 0) {
-        rereadRecentDays = uc.rereadRecentDays;
-      }
-      if (typeof uc.searchFallback === "boolean") {
-        searchFallback = uc.searchFallback;
-      }
-      if (typeof uc.private === "boolean") {
-        privateMode = uc.private;
-      }
-      if (typeof uc.hiddenFromStatusLists === "boolean") {
-        hiddenFromStatusLists = uc.hiddenFromStatusLists;
-      }
+    if (params.userConfig) {
+      applyUserConfig(params.userConfig);
       logger.info(
-        `Plugin config: progressUnit=${progressUnit}, pauseAfterDays=${pauseAfterDays}, dropAfterDays=${dropAfterDays}, notesUnit=${notesUnit}, enableReread=${enableReread}, rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
+        `Plugin config: progressUnit=${progressUnit}, pauseAfterDays=${pauseAfterDays}, ` +
+          `dropAfterDays=${dropAfterDays}, enableReread=${enableReread}, ` +
+          `rereadRecentDays=${rereadRecentDays}, searchFallback=${searchFallback}, ` +
+          `private=${privateMode}, hiddenFromStatusLists=${hiddenFromStatusLists}`,
       );
     }
   },

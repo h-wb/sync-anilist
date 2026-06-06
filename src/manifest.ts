@@ -8,8 +8,7 @@ export const manifest = {
   name: "sync-anilist",
   displayName: "AniList Sync",
   version: packageJson.version,
-  description:
-    "Sync manga reading progress to AniList, with per-series volume/chapter routing (via a [unit:*] notes marker) and reread (REPEATING) detection.",
+  description: "Sync manga reading progress to AniList, with reread (REPEATING) detection.",
   author: "h-wb",
   homepage: "https://github.com/h-wb/sync-anilist",
   protocolVersion: "1.0",
@@ -32,21 +31,12 @@ export const manifest = {
     fields: [
       {
         key: "progressUnit",
-        label: "Default Progress Unit",
+        label: "Progress Unit",
         description:
-          "Default mapping for each Codex book on AniList: 'volumes' or 'chapters'. Override per-series by adding [unit:chapters] (or [unit:volumes]) to that series' notes in Codex (requires Sync Ratings & Notes ON; the marker is never pushed to AniList).",
+          "Mapping for each Codex book on AniList: 'volumes' or 'chapters'. To track different libraries with different units, install this plugin once per library (scope each instance to one library) and set the unit per instance.",
         type: "string" as const,
         required: false,
         default: "volumes",
-      },
-      {
-        key: "notesUnit",
-        label: "Per-Series Unit From Notes",
-        description:
-          "Opt-in. When enabled, a [unit:chapters] or [unit:volumes] marker in a series' Codex notes overrides the default unit for that series (requires Sync Ratings & Notes ON). While enabled, notes are not pushed to AniList and AniList notes are not imported, so the marker can't leak or be clobbered. Off = upstream behavior.",
-        type: "boolean" as const,
-        required: false,
-        default: false,
       },
       {
         key: "enableReread",

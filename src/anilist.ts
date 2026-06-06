@@ -65,6 +65,8 @@ const MANGA_LIST_QUERY = `
         media {
           id
           status
+          volumes
+          chapters
           title {
             romaji
             english
@@ -151,6 +153,19 @@ export interface AniListFuzzyDate {
   day?: number | null;
 }
 
+/** The media (series) a list entry belongs to. */
+export interface AniListMedia {
+  id: number;
+  /** Publishing status, e.g. "FINISHED", "RELEASING". */
+  status?: string;
+  /** Canonical total volumes (null when AniList doesn't track it). */
+  volumes?: number | null;
+  /** Canonical total chapters (null when AniList doesn't track it). */
+  chapters?: number | null;
+  title: { romaji?: string; english?: string; native?: string };
+  siteUrl: string;
+}
+
 export interface AniListMediaListEntry {
   id: number;
   mediaId: number;
@@ -163,12 +178,7 @@ export interface AniListMediaListEntry {
   completedAt: AniListFuzzyDate;
   notes: string | null;
   updatedAt: number;
-  media: {
-    id: number;
-    status?: string;
-    title: { romaji?: string; english?: string; native?: string };
-    siteUrl: string;
-  };
+  media: AniListMedia;
 }
 
 export interface AniListPageInfo {
@@ -186,6 +196,25 @@ export interface AniListSaveResult {
   progress: number;
   progressVolumes: number;
 }
+
+/**
+ * Input for {@link AniListClient.saveEntry} (a `SaveMediaListEntry` mutation).
+ * A type alias (not an interface) so it carries an implicit index signature and
+ * can be passed straight through as GraphQL variables.
+ */
+export type SaveEntryInput = {
+  mediaId: number;
+  status?: string;
+  score?: number;
+  progress?: number;
+  progressVolumes?: number;
+  repeat?: number;
+  startedAt?: AniListFuzzyDate;
+  completedAt?: AniListFuzzyDate;
+  notes?: string;
+  private?: boolean;
+  hiddenFromStatusLists?: boolean;
+};
 
 // =============================================================================
 // Client
@@ -302,22 +331,10 @@ export class AniListClient {
   /**
    * Update or create a manga list entry
    */
-  async saveEntry(variables: {
-    mediaId: number;
-    status?: string;
-    score?: number;
-    progress?: number;
-    progressVolumes?: number;
-    repeat?: number;
-    startedAt?: AniListFuzzyDate;
-    completedAt?: AniListFuzzyDate;
-    notes?: string;
-    private?: boolean;
-    hiddenFromStatusLists?: boolean;
-  }): Promise<AniListSaveResult> {
+  async saveEntry(input: SaveEntryInput): Promise<AniListSaveResult> {
     const data = await this.query<{ SaveMediaListEntry: AniListSaveResult }>(
       UPDATE_ENTRY_MUTATION,
-      variables,
+      input,
     );
     return data.SaveMediaListEntry;
   }

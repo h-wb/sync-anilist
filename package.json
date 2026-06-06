@@ -1,7 +1,7 @@
 {
   "name": "@h-wb/sync-anilist",
-  "version": "1.0.0",
-  "description": "Codex plugin to sync manga reading progress to AniList, with per-series volume/chapter routing via notes and reread (REPEATING) detection",
+  "version": "1.1.0",
+  "description": "Codex plugin to sync manga reading progress to AniList, with reread (REPEATING) detection",
   "main": "dist/index.js",
   "bin": "dist/index.js",
   "type": "module",
@@ -37,7 +37,8 @@
     "sync",
     "manga",
     "reading-progress",
-    "reread"
+    "reread",
+    "repeating"
   ],
   "author": "h-wb",
   "license": "MIT",
@@ -45,7 +46,7 @@
     "node": ">=22.0.0"
   },
   "devDependencies": {
-    "@ashdev/codex-plugin-sdk": "^1.34.1",
+    "@ashdev/codex-plugin-sdk": "^1.35.0",
     "@biomejs/biome": "^2.4.4",
     "@types/node": "^22.0.0",
     "esbuild": "^0.27.3",
