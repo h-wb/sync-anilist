@@ -240,7 +240,13 @@ export const provider: SyncProvider = {
     // current AniList status/progress/repeat (needed for reread detection).
     const existing = new Map<
       number,
-      { status: string; progress: number; progressVolumes: number; repeat: number; mediaStatus?: string }
+      {
+        status: string;
+        progress: number;
+        progressVolumes: number;
+        repeat: number;
+        mediaStatus?: string;
+      }
     >();
     let page = 1;
     let hasMore = true;
