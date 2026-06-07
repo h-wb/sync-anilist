@@ -1,9 +1,12 @@
 name: Release
 
+# Per-package releases. Tag a package with "<package>-v<version>", e.g.
+#   metadata-mangabaka-v1.0.0
+#   sync-anilist-v1.4.0
 on:
   push:
     tags:
-      - "v*"
+      - "*-v*"
 
 permissions:
   contents: write
@@ -18,12 +21,23 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run check
+      # Derive the package directory from the tag: "<package>-v<version>".
+      - name: Resolve package from tag
+        run: |
+          PKG="${GITHUB_REF_NAME%-v*}"
+          if [ ! -d "packages/$PKG" ]; then
+            echo "::error::No package directory packages/$PKG for tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+      # Lint, typecheck and test the whole workspace before publishing anything.
+      - run: npm run lint
+      - run: npm run typecheck
       - run: npm test
-      # npm pack runs `prepare` (esbuild build) and produces a self-contained,
-      # installable tarball — no git or npm registry needed to consume it.
+      # npm pack runs the package's `prepare` (esbuild build) and produces a
+      # self-contained, installable tarball — no npm registry needed to consume.
       - name: Pack installable tarball
-        run: echo "TARBALL=$(npm pack | tail -1)" >> "$GITHUB_ENV"
+        run: echo "TARBALL=$(npm pack --workspace "packages/$PKG" | tail -1)" >> "$GITHUB_ENV"
       - name: Create GitHub Release with the tarball
         env:
           GH_TOKEN: ${{ github.token }}
